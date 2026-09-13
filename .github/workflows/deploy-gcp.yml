@@ -1,0 +1,129 @@
+name: Deploy GCP
+
+on:
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: gcpnetwork-508018
+  REGION: asia-south1
+  AR_REPO: trend-commerce
+  API_SERVICE: trend-api
+  WEB_SERVICE: trend-web
+  SQL_INSTANCE: trend-db
+  DB_NAME: trendcommerce
+  DB_USER: trendapp
+  GCS_BUCKET: gcpnetwork-508018-trend-media
+  DEPLOY_SERVICE_ACCOUNT: trend-deployer@gcpnetwork-508018.iam.gserviceaccount.com
+  RUNTIME_SERVICE_ACCOUNT: trend-runtime@gcpnetwork-508018.iam.gserviceaccount.com
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Artifact Registry auth
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Resolve Cloud SQL connection
+        id: sql
+        run: |
+          CONNECTION_NAME=$(gcloud sql instances describe "$SQL_INSTANCE" --format='value(connectionName)')
+          echo "connection_name=$CONNECTION_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push API
+        run: |
+          API_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/api:${GITHUB_SHA}"
+          docker build -t "$API_IMAGE" backend
+          docker push "$API_IMAGE"
+          echo "API_IMAGE=$API_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy API
+        run: |
+          gcloud run deploy "$API_SERVICE" \
+            --image "$API_IMAGE" \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+            --add-cloudsql-instances "${{ steps.sql.outputs.connection_name }}" \
+            --set-secrets "DJANGO_SECRET_KEY=django-secret:latest,OPENAI_API_KEY=openai-api-key:latest,DB_PASSWORD=db-password:latest" \
+            --set-env-vars "CLOUD_SQL_CONNECTION_NAME=${{ steps.sql.outputs.connection_name }},DB_NAME=${DB_NAME},DB_USER=${DB_USER},GCS_BUCKET=${GCS_BUCKET},ALLOWED_HOSTS=.run.app,FREE_DAILY_GENERATION_LIMIT=100,FREE_DAILY_BUDGET_USD=1,OPENAI_IMAGE_QUALITY=low" \
+            --min-instances 0 \
+            --max-instances 3 \
+            --memory 1Gi \
+            --cpu 1 \
+            --timeout 300
+
+      - name: Run database migrations
+        run: |
+          gcloud run jobs deploy trend-migrate \
+            --image "$API_IMAGE" \
+            --region "$REGION" \
+            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+            --set-cloudsql-instances "${{ steps.sql.outputs.connection_name }}" \
+            --set-secrets "DJANGO_SECRET_KEY=django-secret:latest,OPENAI_API_KEY=openai-api-key:latest,DB_PASSWORD=db-password:latest" \
+            --set-env-vars "CLOUD_SQL_CONNECTION_NAME=${{ steps.sql.outputs.connection_name }},DB_NAME=${DB_NAME},DB_USER=${DB_USER},GCS_BUCKET=${GCS_BUCKET}" \
+            --command python \
+            --args manage.py,migrate
+          gcloud run jobs execute trend-migrate --region "$REGION" --wait
+
+      - name: Seed trend products
+        run: |
+          gcloud run jobs deploy trend-seed \
+            --image "$API_IMAGE" \
+            --region "$REGION" \
+            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+            --set-cloudsql-instances "${{ steps.sql.outputs.connection_name }}" \
+            --set-secrets "DJANGO_SECRET_KEY=django-secret:latest,OPENAI_API_KEY=openai-api-key:latest,DB_PASSWORD=db-password:latest" \
+            --set-env-vars "CLOUD_SQL_CONNECTION_NAME=${{ steps.sql.outputs.connection_name }},DB_NAME=${DB_NAME},DB_USER=${DB_USER},GCS_BUCKET=${GCS_BUCKET}" \
+            --command python \
+            --args manage.py,seed_trends
+          gcloud run jobs execute trend-seed --region "$REGION" --wait
+
+      - name: Resolve API URL
+        id: api
+        run: |
+          API_URL=$(gcloud run services describe "$API_SERVICE" --region "$REGION" --format='value(status.url)')
+          echo "url=$API_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push web
+        run: |
+          WEB_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/web:${GITHUB_SHA}"
+          docker build --build-arg "NEXT_PUBLIC_API_BASE_URL=${{ steps.api.outputs.url }}/api/v1" -t "$WEB_IMAGE" frontend
+          docker push "$WEB_IMAGE"
+          echo "WEB_IMAGE=$WEB_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy web
+        run: |
+          gcloud run deploy "$WEB_SERVICE" \
+            --image "$WEB_IMAGE" \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --min-instances 0 \
+            --max-instances 3 \
+            --memory 512Mi \
+            --cpu 1
+
+      - name: Restrict API CORS to deployed web
+        run: |
+          WEB_URL=$(gcloud run services describe "$WEB_SERVICE" --region "$REGION" --format='value(status.url)')
+          gcloud run services update "$API_SERVICE" \
+            --region "$REGION" \
+            --update-env-vars "CORS_ALLOWED_ORIGINS=${WEB_URL}"
+          echo "Web: $WEB_URL"
+          echo "API: ${{ steps.api.outputs.url }}"

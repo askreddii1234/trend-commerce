@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from urllib.parse import urlparse
+
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -10,6 +11,7 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-change-me")
 DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = [x for x in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if x]
 CORS_ALLOWED_ORIGINS = [x for x in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",") if x]
+CORS_ALLOWED_ORIGIN_REGEXES = [x for x in os.getenv("CORS_ALLOWED_ORIGIN_REGEXES", "").split(",") if x]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -50,7 +52,18 @@ TEMPLATES = [{
 }]
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL:
+CLOUD_SQL_CONNECTION_NAME = os.getenv("CLOUD_SQL_CONNECTION_NAME")
+if CLOUD_SQL_CONNECTION_NAME:
+    DATABASES = {"default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.getenv("DB_NAME", "trendcommerce"),
+        "USER": os.getenv("DB_USER", "trendapp"),
+        "PASSWORD": os.environ["DB_PASSWORD"],
+        "HOST": f"/cloudsql/{CLOUD_SQL_CONNECTION_NAME}",
+        "PORT": "",
+        "CONN_MAX_AGE": 60,
+    }}
+elif DATABASE_URL:
     parsed = urlparse(DATABASE_URL)
     DATABASES = {"default": {
         "ENGINE": "django.db.backends.postgresql",
