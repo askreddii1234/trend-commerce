@@ -1,10 +1,14 @@
 import base64
 import hashlib
+import io
+import os
+
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db.models import Sum
 from django.utils import timezone
 from openai import OpenAI
+
 from .models import Generation
 
 
@@ -14,7 +18,7 @@ def hash_ip(ip: str) -> str:
 
 def enforce_free_limits(product, ip_hash: str):
     today = timezone.localdate()
-    qs = Generation.objects.filter(created_at__date=today)
+    qs = Generation.objects.filter(created_at__date=today).exclude(status="failed")
     if qs.count() >= settings.FREE_DAILY_GENERATION_LIMIT:
         raise ValueError("Today's free generation capacity has been reached.")
     if qs.filter(product=product).count() >= product.daily_generation_cap:
@@ -44,17 +48,23 @@ def generate_image(generation: Generation) -> Generation:
     generation.save(update_fields=["status", "model"])
 
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
     generation.source_image.open("rb")
     try:
-        result = client.images.edit(
-            model=settings.OPENAI_IMAGE_MODEL,
-            image=generation.source_image.file,
-            prompt=generation.prompt_snapshot,
-            size="1024x1024",
-            quality=settings.OPENAI_IMAGE_QUALITY,
-        )
+        source_bytes = generation.source_image.read()
     finally:
         generation.source_image.close()
+
+    source_file = io.BytesIO(source_bytes)
+    source_file.name = os.path.basename(generation.source_image.name) or "source.png"
+
+    result = client.images.edit(
+        model=settings.OPENAI_IMAGE_MODEL,
+        image=source_file,
+        prompt=generation.prompt_snapshot,
+        size="1024x1024",
+        quality=settings.OPENAI_IMAGE_QUALITY,
+    )
 
     image_b64 = result.data[0].b64_json
     if not image_b64:
