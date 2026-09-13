@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.http import FileResponse
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
@@ -59,3 +60,18 @@ class GenerationDetailView(APIView):
         except Generation.DoesNotExist:
             return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response(GenerationSerializer(generation, context={"request": request}).data)
+
+class GenerationImageView(APIView):
+    def get(self, request, generation_id):
+        try:
+            generation = Generation.objects.get(id=generation_id, status="completed")
+        except Generation.DoesNotExist:
+            return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not generation.result_image:
+            return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        generation.result_image.open("rb")
+        response = FileResponse(generation.result_image.file, content_type="image/png")
+        response["Cache-Control"] = "private, max-age=3600"
+        response["Content-Disposition"] = f'inline; filename="{generation.id}.png"'
+        return response
