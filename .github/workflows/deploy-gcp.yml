@@ -114,6 +114,7 @@ jobs:
             --region "$REGION" \
             --platform managed \
             --allow-unauthenticated \
+            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
             --min-instances 0 \
             --max-instances 3 \
             --memory 512Mi \
