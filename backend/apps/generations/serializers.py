@@ -1,3 +1,4 @@
+from django.urls import reverse
 from rest_framework import serializers
 from .models import Generation
 
@@ -11,7 +12,7 @@ class GenerationSerializer(serializers.ModelSerializer):
 
     def get_result_url(self, obj):
         request = self.context.get("request")
-        if not obj.result_image:
+        if not obj.result_image or obj.status != "completed":
             return None
-        url = obj.result_image.url
+        url = reverse("generation-image", kwargs={"generation_id": obj.id})
         return request.build_absolute_uri(url) if request else url
